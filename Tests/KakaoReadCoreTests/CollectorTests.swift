@@ -37,7 +37,9 @@ final class FakeChat {
 
 /// 실제 카톡(2026-10-19 검증): 불러온 행을 모두 유지하고, 스크롤바가 맨 위(0)에 닿을 때만 과거 행을 더 불러온다.
 final class AccumulatingChat {
-    let history: [Message]
+    var history: [Message]
+    /// 스냅샷마다 새로 도착하는 메시지 수 (실제 단톡방: 수집 중에도 대화가 이어진다).
+    var arrivalsPerSnapshot = 0
     var loadedFrom: Int
     let batch: Int
     var bar = 1.0
@@ -56,7 +58,14 @@ final class AccumulatingChat {
         }
     }
 
-    func snapshot() -> [Message] { Array(history[loadedFrom...]) }
+    func snapshot() -> [Message] {
+        for _ in 0..<arrivalsPerSnapshot {
+            let i = history.count
+            history.append(Message(date: "2026-10-19", time: String(format: "%02d:%02d", 9 + i / 60, i % 60),
+                                   sender: "u\(i % 3)", kind: .text, text: "m\(i)"))
+        }
+        return Array(history[loadedFrom...])
+    }
 
     func collector() -> Collector {
         Collector(snapshot: { self.snapshot() }, scroll: { self.scroll($0) }, calendar: seoul)
@@ -151,19 +160,48 @@ func history(_ n: Int, text: (Int) -> String = { "m\($0)" }) -> [Message] {
         #expect(r.partial == .topReached)
     }
 
-    @Test func overlapFindsLongestSuffixPrefix() {
-        let h = history(10)
-        #expect(Collector.overlap(older: Array(h[0..<6]), newer: Array(h[3..<10])) == 3)
-        #expect(Collector.overlap(older: Array(h[0..<3]), newer: Array(h[5..<10])) == 0)
-        #expect(Collector.overlap(older: Array(h[2..<5]), newer: Array(h[2..<10])) == 3)
-        #expect(Collector.overlap(older: Array(h[0..<5]), newer: Array(h[0..<5])) == 5)
+    @Test func newMessagesArrivingDuringCollectionAreMerged() throws {
+        let chat = AccumulatingChat(history(200), initiallyLoaded: 50, batch: 20)
+        chat.arrivalsPerSnapshot = 1
+        let r = try chat.collector().run(until: .count(120))
+        #expect(r.messages.map(\.text) == chat.history.suffix(120).map(\.text))
+        #expect(r.partial == nil)
     }
 
-    @Test func overlapIgnoresSystemDateDifferences() {
+    @Test func alignFindsOffsetAnywhere() {
+        let h = history(10)
+        // 배치가 acc보다 앞에서 시작 (과거 쪽으로 진전)
+        #expect(Collector.align(batch: Array(h[0..<6]), acc: Array(h[3..<10]))?.offset == -3)
+        // 배치가 acc 뒤로 더 길다 (새 메시지 도착)
+        #expect(Collector.align(batch: Array(h[3..<10]), acc: Array(h[3..<8]))?.offset == 0)
+        // 배치가 acc 안에 들어 있다 (화면이 아래로 되돌아감)
+        #expect(Collector.align(batch: Array(h[5..<8]), acc: Array(h[2..<10]))?.offset == 3)
+        // 배치가 acc를 양쪽으로 덮는다
+        #expect(Collector.align(batch: Array(h[0..<10]), acc: Array(h[4..<6]))?.offset == -4)
+        // 겹침 없음
+        #expect(Collector.align(batch: Array(h[0..<3]), acc: Array(h[5..<10])) == nil)
+    }
+
+    @Test func alignIgnoresSingleCoincidentalMatch() {
+        let h = history(10)
+        var batch = Array(h[0..<3])
+        batch[2].text = h[5].text
+        #expect(Collector.align(batch: batch, acc: Array(h[5..<10])) == nil)
+    }
+
+    @Test func mergeAddsOlderAndNewerAndFillsGaps() {
+        let h = history(10)
+        var acc = Array(h[3..<8])
+        acc[0].sender = nil
+        let merged = Collector.merge(batch: h, acc: acc, offset: -3)
+        #expect(merged == h)
+    }
+
+    @Test func alignIgnoresSystemDateDifferences() {
         let a = Message(date: "2026-10-18", time: nil, sender: "system", kind: .system, text: "2026년 10월 19일")
         var b = a
         b.date = "2026-10-19"
-        #expect(Collector.overlap(older: [a], newer: [b]) == 1)
+        #expect(Collector.align(batch: [a], acc: [b])?.offset == 0)
     }
 
     @Test func trimCountSkipsSystemRows() {

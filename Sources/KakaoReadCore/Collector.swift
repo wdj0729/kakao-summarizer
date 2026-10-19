@@ -61,25 +61,32 @@ public struct Collector {
             try scroll(-step)
             scrolls += 1
             let batch = try snapshot()
-            let k = Self.overlap(older: batch, newer: acc)
-            if batch.isEmpty || k == batch.count {
-                // 카톡은 불러온 행을 유지하고 맨 위에 닿을 때만 과거를 더 불러온다.
-                // 새 행이 없으면 간격을 두 배로 늘리고, 최대 간격(맨 위)에서도 없을 때만 맨 위 도달로 본다.
-                if step < 1 { step = min(1, step * 2); continue }
-                idle += 1
-                if idle >= topPatience {
-                    if case .count = stop { partial = .topReached }
-                    break
-                }
-            } else if k == 0 {
+            let alignment = Self.align(batch: batch, acc: acc)
+            if !batch.isEmpty, alignment == nil {
                 // 한 화면보다 많이 올라가 틈이 생겼다 → 되돌리고 간격을 절반으로.
                 try scroll(step)
                 scrolls += 1
                 step /= 2
                 if step < minStep { partial = .mergeFailed; break }
-            } else {
-                acc = Self.merge(older: batch, newer: acc, overlap: k)
+                continue
+            }
+            var progressed = false
+            if let (offset, _) = alignment {
+                // 새로 도착한 메시지(뒤쪽)도 함께 붙인다. 진전은 과거 쪽으로 넓어졌을 때만.
+                acc = Self.merge(batch: batch, acc: acc, offset: offset)
+                progressed = offset < 0
+            }
+            if progressed {
                 idle = 0
+                continue
+            }
+            // 카톡은 불러온 행을 유지하고 맨 위에 닿을 때만 과거를 더 불러온다.
+            // 과거 쪽 진전이 없으면 간격을 두 배로 늘리고, 최대 간격(맨 위)에서도 없을 때만 맨 위 도달로 본다.
+            if step < 1 { step = min(1, step * 2); continue }
+            idle += 1
+            if idle >= topPatience {
+                if case .count = stop { partial = .topReached }
+                break
             }
         }
         return CollectResult(messages: Self.trim(acc, to: stop, calendar: calendar), partial: partial)
@@ -100,27 +107,35 @@ public struct Collector {
         m.kind == .system ? "system\u{1}\(m.text)" : "\(m.date)\u{1}\(m.kind.rawValue)\u{1}\(m.text)"
     }
 
-    /// older의 뒷부분과 newer의 앞부분이 겹치는 최대 길이.
-    public static func overlap(older: [Message], newer: [Message]) -> Int {
-        let o = older.map(key)
-        let n = newer.map(key)
-        var k = min(o.count, n.count)
-        while k > 0 {
-            if o.suffix(k).elementsEqual(n.prefix(k)) { return k }
-            k -= 1
+    /// batch를 acc에 겹쳐 놓을 위치. offset = batch[0]이 놓이는 acc 인덱스(음수면 acc보다 과거에서 시작).
+    /// 겹치는 구간이 모두 일치하는 위치 중 가장 길게 겹치는 곳. 우연한 한 줄 일치를 피하려고 최소 2줄(배치가 더 짧으면 그 길이) 겹쳐야 한다.
+    public static func align(batch: [Message], acc: [Message]) -> (offset: Int, length: Int)? {
+        let b = batch.map(key)
+        let a = acc.map(key)
+        guard !b.isEmpty, !a.isEmpty else { return nil }
+        let minLength = min(2, b.count, a.count)
+        var best: (offset: Int, length: Int)? = nil
+        for d in (-(b.count - 1))..<a.count {
+            let start = max(0, d)
+            let end = min(a.count, d + b.count)
+            let length = end - start
+            guard length >= minLength, length > (best?.length ?? 0) else { continue }
+            if (start..<end).allSatisfy({ a[$0] == b[$0 - d] }) { best = (d, length) }
         }
-        return 0
+        return best
     }
 
-    /// 겹치는 구간은 newer 쪽을 유지하되 비어 있는 발신자·시각을 older 쪽으로 보충한다.
-    public static func merge(older: [Message], newer: [Message], overlap k: Int) -> [Message] {
-        var tail = newer
-        for i in 0..<k {
-            let o = older[older.count - k + i]
-            if tail[i].sender == nil { tail[i].sender = o.sender }
-            if tail[i].time == nil { tail[i].time = o.time }
+    /// batch를 offset 위치에 겹쳐 acc를 넓힌다: 앞쪽(과거)과 뒤쪽(새로 도착) 모두 붙이고, 겹친 구간의 빈 발신자·시각은 batch로 보충.
+    public static func merge(batch: [Message], acc: [Message], offset d: Int) -> [Message] {
+        var middle = acc
+        for i in max(0, d)..<min(acc.count, d + batch.count) {
+            let b = batch[i - d]
+            if middle[i].sender == nil { middle[i].sender = b.sender }
+            if middle[i].time == nil { middle[i].time = b.time }
         }
-        return Array(older.dropLast(k)) + tail
+        let older = d < 0 ? Array(batch[0..<(-d)]) : []
+        let newer = d + batch.count > acc.count ? Array(batch[(acc.count - d)...]) : []
+        return older + middle + newer
     }
 
     public static func trim(_ acc: [Message], to stop: StopCondition, calendar: Calendar) -> [Message] {

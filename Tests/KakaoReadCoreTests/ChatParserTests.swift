@@ -72,6 +72,15 @@ import Testing
         #expect(out == [Message(date: "2026-10-19", time: "07:43", sender: Message.me, kind: .media, text: "[파일: 보고서.pdf]")])
     }
 
+    /// 실제 카톡: 누가 입력 중이면 맨 아래에 "chatmsg bg typing white" 이미지 행이 잠깐 생겼다 사라진다.
+    @Test func uiAssetImagesAreNotMessages() {
+        let out = parse([
+            Fx.row([Fx.profile(), Fx.meta(time: "오전 9:00"), Fx.name("가"), Fx.body("hi"), Fx.image("common icon newdot")]),
+            Fx.row([AXNode(role: "AXImage", desc: "chatmsg bg typing white", frame: CGRect(x: 60, y: 0, width: 40, height: 20))]),
+        ])
+        #expect(out == [Message(date: "2026-10-19", time: "09:00", sender: "가", kind: .text, text: "hi")])
+    }
+
     @Test func systemRowsTakeNeighborDateAndEmptyRowsDrop() {
         let out = parse([
             Fx.row([AXNode(role: "AXButton")]),

@@ -52,8 +52,22 @@ func cmdMessages(_ argv: [String]) throws {
         throw KakaoReadError.uiChanged
     }
 
-    let collector = Collector(snapshot: { ChatParser.parse(window: AX.snapshot(window)) },
-                              scroll: { try app.scroll(window, by: $0) })
+    // KAKAO_READ_DEBUG=1: 스크롤/스냅샷마다 진단 한 줄을 stderr로 (내용 없이 개수·시각만).
+    let debug = ProcessInfo.processInfo.environment["KAKAO_READ_DEBUG"] != nil
+    let collector = Collector(
+        snapshot: {
+            let snap = AX.snapshot(window)
+            let batch = ChatParser.parse(window: snap)
+            if debug {
+                let times = batch.compactMap { $0.time }
+                writeErr("DEBUG snapshot rows=\(ChatParser.rows(in: snap).count) msgs=\(batch.count) \(times.first ?? "-")…\(times.last ?? "-") bar=\(app.scrollBarValue(window).map { String(format: "%.4f", $0) } ?? "nil")")
+            }
+            return batch
+        },
+        scroll: { delta in
+            if debug { writeErr("DEBUG scroll \(delta)") }
+            try app.scroll(window, by: delta)
+        })
     let result = try collector.run(until: stop)
     for message in result.messages { print(JSONOutput.line(message)) }
     if let warning = PartialWarning.text(result: result, range: args.range) { writeErr(warning) }

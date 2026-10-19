@@ -55,7 +55,7 @@ public enum ChatParser {
         let nameNode = hasProfile
             ? items.first { $0.role == "AXStaticText" && $0.help == nil && !($0.value ?? "").isEmpty }
             : nil
-        let images = items.filter { $0.role == "AXImage" && !($0.desc ?? "").hasPrefix("badge") }
+        let images = items.filter { $0.role == "AXImage" && !isUIAsset($0.desc) }
         let isFile = items.contains { $0.role == "AXButton" && $0.desc == "저장" }
         let hasShare = items.contains { $0.role == "AXButton" && $0.desc == "공유" }
 
@@ -90,6 +90,15 @@ public enum ChatParser {
         let isMine = !hasProfile && isRightSide(contentFrame, in: windowFrame)
         return .message(date: date, time: KakaoFormat.time24(from: meta?.value ?? ""), name: nameNode?.value,
                         isMine: isMine, kind: kind, text: text)
+    }
+
+    private static let uiAssetRegex = try! Regex(#"^[a-z0-9_ ]+$"#)
+
+    /// 카톡 UI 장식 이미지는 내부 에셋 이름을 설명으로 갖는다 ("badge me", "common icon newdot",
+    /// "chatmsg bg typing white" 입력 중 표시 등). 사진/이모티콘 내용이 아니다.
+    private static func isUIAsset(_ desc: String?) -> Bool {
+        guard let desc, !desc.isEmpty else { return false }
+        return desc.wholeMatch(of: uiAssetRegex) != nil
     }
 
     private static func union(_ frames: [CGRect]) -> CGRect? {
