@@ -69,9 +69,14 @@ struct KakaoApp {
                 if let w = waitForChatWindow(name) { return (w, "\(AX.role(target) ?? "?").\(action)") }
             }
         }
-        // 화면 밖 좌표를 클릭하면 다른 앱이 눌릴 수 있다 → 목록 영역 안에 보일 때만 클릭한다.
+        // 화면 밖이나 다른 창에 가려진 좌표를 클릭하면 엉뚱한 곳이 눌린다
+        // → 목록 영역 안에 있고, 그 좌표의 최상단 요소가 실제로 이 행일 때만 클릭한다.
         if let f = try visibleFrame(of: row) {
-            Mouse.doubleClick(at: CGPoint(x: f.midX, y: f.midY), app: app)
+            let point = CGPoint(x: f.midX, y: f.midY)
+            app.activate(options: [])
+            usleep(300_000)
+            guard isTopmost(row, at: point) else { throw KakaoReadError.openFailed(name) }
+            Mouse.doubleClick(at: point)
             if let w = waitForChatWindow(name, timeout: 3) { return (w, "double-click") }
         }
         throw KakaoReadError.openFailed(name)
@@ -82,6 +87,21 @@ struct KakaoApp {
         AX.find(window) { e in
             AX.role(e) == kAXScrollAreaRole && AX.children(e).contains { AX.role($0) == kAXTableRole }
         }
+    }
+
+    /// 화면 좌표 point의 최상단 요소가 카톡의 target(또는 그 자손)인지.
+    func isTopmost(_ target: AXUIElement, at point: CGPoint) -> Bool {
+        var hit: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), Float(point.x), Float(point.y), &hit) == .success,
+              var element = hit else { return false }
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(element, &pid) == .success, pid == app.processIdentifier else { return false }
+        for _ in 0..<15 {
+            if CFEqual(element, target) { return true }
+            guard let parent = AX.element(element, kAXParentAttribute) else { return false }
+            element = parent
+        }
+        return false
     }
 
     func chatScrollBar(_ window: AXUIElement) -> AXUIElement? {
@@ -112,12 +132,24 @@ struct KakaoApp {
 
     /// delta: 스크롤바 비율(0…1) 변화량. 음수 = 위(과거), 양수 = 아래(최신). 이동 후 로딩을 기다린다.
     func scroll(_ window: AXUIElement, by delta: Double) throws {
-        guard let bar = chatScrollBar(window) else { throw KakaoReadError.uiChanged }
+        // 스크롤바는 로딩 중 잠깐 사라지거나, 메시지가 한 화면에 다 들어가는 방에는 아예 없다.
+        var found = chatScrollBar(window)
+        for _ in 0..<3 where found == nil {
+            usleep(200_000)
+            found = chatScrollBar(window)
+        }
+        guard let bar = found else {
+            if tableScrollArea(window) != nil { return }  // 스크롤할 것이 없음 → 수집기가 맨 위 도달로 판단
+            throw KakaoReadError.uiChanged
+        }
         let current = (AX.attr(bar, kAXValueAttribute) as? NSNumber)?.doubleValue ?? 1
         let target = min(1, max(0, current + delta))
         let result = AXUIElementSetAttributeValue(bar, kAXValueAttribute as CFString, NSNumber(value: target))
-        if result != .success, let f = AX.frame(window) {
-            Mouse.scrollWheel(at: CGPoint(x: f.midX, y: f.midY), pixels: Int32(-delta * 3000))
+        if result != .success, let area = tableScrollArea(window), let f = AX.frame(area) {
+            let point = CGPoint(x: f.midX, y: f.midY)
+            if isTopmost(area, at: point) {
+                Mouse.scrollWheel(at: point, pixels: Int32(-delta * 3000))
+            }
         }
         usleep(400_000)
     }

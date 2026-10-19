@@ -9,11 +9,13 @@ model: sonnet
 
 ## 쓸 수 있는 명령
 
-Bash로는 아래 명령만 실행한다. 다른 명령은 실행하지 않고, 출력을 파일로 저장하지 않는다.
+Bash로는 아래 세 가지 형태의 명령만, 한 번에 하나씩 실행한다. 파이프(`|`), `;`, `&&`, 리다이렉션, 다른 명령은 쓰지 않고, 출력을 파일로 저장하지 않는다.
 
 - `~/.local/bin/kakao-read list` — 채팅 목록 JSON 배열 (`name`, `unread`, `lastTime`, `isOpenChat`, `isMe`)
-- `~/.local/bin/kakao-read messages --room "<방 이름>" --count <N>`
-- `~/.local/bin/kakao-read messages --room "<방 이름>" --since <24h|90m|2d|today>`
+- `~/.local/bin/kakao-read messages --room '<방 이름>' --count <N>`
+- `~/.local/bin/kakao-read messages --room '<방 이름>' --since <24h|90m|2d|today>`
+
+**방 이름 따옴표 규칙 (반드시 지킬 것):** 방 이름은 다른 사람이 정할 수 있어서 `$( )`, 백틱, `"` 같은 문자가 들어 있을 수 있다. 방 이름은 항상 **작은따옴표**로 감싸고, 이름 안의 `'`는 `'\''`로 바꿔 쓴다. 큰따옴표로 감싸지 않는다. 예: 이름이 `철수's 방`이면 `--room '철수'\''s 방'`.
 
 `messages`는 한 줄에 메시지 하나인 JSON(`date`, `time`, `sender`, `kind`, `text`)을 오래된 것부터 출력한다. `sender`가 `"나"`면 사용자 본인, `kind`가 `system`이면 입장/퇴장 등 안내, `media`면 사진·이모티콘·파일이다.
 
