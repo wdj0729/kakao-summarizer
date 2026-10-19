@@ -34,7 +34,7 @@ public enum ChatParser {
             }
         }
         backfillTimes(&out)
-        fillSystemDates(&out)
+        fillDates(&out)
         return out
     }
 
@@ -51,35 +51,49 @@ public enum ChatParser {
             .replacingOccurrences(of: "\u{FFFC}", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let meta = items.first { $0.role == "AXStaticText" && KakaoFormat.isoDate(fromHelp: $0.help ?? "") != nil }
+        let hasProfile = items.contains { $0.role == "AXButton" && $0.desc == "프로필" }
+        let nameNode = hasProfile
+            ? items.first { $0.role == "AXStaticText" && $0.help == nil && !($0.value ?? "").isEmpty }
+            : nil
+        let images = items.filter { $0.role == "AXImage" && !($0.desc ?? "").hasPrefix("badge") }
+        let isFile = items.contains { $0.role == "AXButton" && $0.desc == "저장" }
+        let hasShare = items.contains { $0.role == "AXButton" && $0.desc == "공유" }
 
-        guard let meta, let date = KakaoFormat.isoDate(fromHelp: meta.help ?? "") else {
-            let text = body.isEmpty
-                ? items.filter { $0.role == "AXStaticText" }.compactMap(\.value).joined(separator: " ")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                : body
+        // 날짜 메타는 시각이 표시되는 행에만 있을 수 있다 (안 읽은 수가 없는 방의 연속 메시지).
+        // 메타가 없어도 내용 요소가 있으면 메시지다.
+        guard meta != nil || !body.isEmpty || !images.isEmpty || isFile || hasShare else {
+            let text = items.filter { $0.role == "AXStaticText" }.compactMap(\.value).joined(separator: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
             return text.isEmpty ? nil : .system(text)
         }
 
-        let hasProfile = items.contains { $0.role == "AXButton" && $0.desc == "프로필" }
-        let name = hasProfile
-            ? items.first { $0.role == "AXStaticText" && $0.help == nil && !($0.value ?? "").isEmpty }?.value
-            : nil
-        let images = items.filter { $0.role == "AXImage" && !($0.desc ?? "").hasPrefix("badge") }
-        // 여러 장 사진은 좌우로 나란히 놓이므로 이미지 영역 전체의 합집합으로 위치를 본다.
-        let imagesFrame = images.compactMap(\.frame).reduce(into: nil as CGRect?) { acc, f in acc = acc?.union(f) ?? f }
-
-        let kind: Message.Kind = body.isEmpty ? .media : .text
+        let date = meta.flatMap { KakaoFormat.isoDate(fromHelp: $0.help ?? "") } ?? ""
+        let fileTexts = items.filter { $0.role == "AXStaticText" && $0 != meta && $0 != nameNode }
+        let kind: Message.Kind
         let text: String
-        if body.isEmpty {
+        let contentFrame: CGRect?
+        if !body.isEmpty {
+            kind = .text
+            text = body
+            contentFrame = bodyNode?.frame
+        } else if isFile {
+            kind = .media
+            text = fileTexts.first?.value.map { "[파일: \($0)]" } ?? "[파일]"
+            contentFrame = union(fileTexts.compactMap(\.frame))
+        } else {
+            kind = .media
             let label = images.compactMap(\.desc).first { !$0.isEmpty }
             text = label.map { "[사진/이모티콘: \($0)]" } ?? "[사진/이모티콘]"
-        } else {
-            text = body
+            // 여러 장 사진은 좌우로 나란히 놓이므로 이미지 영역 전체의 합집합으로 위치를 본다.
+            contentFrame = union(images.compactMap(\.frame)) ?? bodyNode?.frame
         }
-        let contentFrame = body.isEmpty ? (imagesFrame ?? bodyNode?.frame) : bodyNode?.frame
         let isMine = !hasProfile && isRightSide(contentFrame, in: windowFrame)
-        return .message(date: date, time: KakaoFormat.time24(from: meta.value ?? ""), name: name,
+        return .message(date: date, time: KakaoFormat.time24(from: meta?.value ?? ""), name: nameNode?.value,
                         isMine: isMine, kind: kind, text: text)
+    }
+
+    private static func union(_ frames: [CGRect]) -> CGRect? {
+        frames.reduce(into: nil as CGRect?) { acc, f in acc = acc?.union(f) ?? f }
     }
 
     private static func isRightSide(_ content: CGRect?, in window: CGRect?) -> Bool {
@@ -95,21 +109,21 @@ public enum ChatParser {
         }
     }
 
-    /// system 행 날짜: 바로 다음 메시지 날짜, 없으면 바로 앞 메시지 날짜.
-    private static func fillSystemDates(_ messages: inout [Message]) {
+    /// 비어 있는 날짜(system 행, 메타 없는 연속 메시지): 바로 다음 메시지 날짜, 없으면 바로 앞 메시지 날짜.
+    private static func fillDates(_ messages: inout [Message]) {
         var next: String? = nil
         for i in messages.indices.reversed() {
-            if messages[i].kind == .system {
-                if messages[i].date.isEmpty, let next { messages[i].date = next }
-            } else {
+            if messages[i].date.isEmpty {
+                if let next { messages[i].date = next }
+            } else if messages[i].kind != .system {
                 next = messages[i].date
             }
         }
         var previous: String? = nil
         for i in messages.indices {
-            if messages[i].kind == .system {
-                if messages[i].date.isEmpty, let previous { messages[i].date = previous }
-            } else {
+            if messages[i].date.isEmpty {
+                if let previous { messages[i].date = previous }
+            } else if messages[i].kind != .system {
                 previous = messages[i].date
             }
         }

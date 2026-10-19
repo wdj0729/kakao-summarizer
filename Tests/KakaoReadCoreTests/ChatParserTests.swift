@@ -47,6 +47,31 @@ import Testing
         #expect(out.map(\.sender) == [Message.me])
     }
 
+    /// 실제 카톡(나와의 채팅 등 안 읽은 수가 없는 방): 시각이 표시되지 않는 연속 메시지 행에는 날짜 메타가 없다.
+    @Test func continuationRowsWithoutMetaAreMessages() {
+        let share = AXNode(role: "AXButton", desc: "공유")
+        let out = parse([
+            Fx.row([share, Fx.image(mine: true, size: 120)]),
+            Fx.row([share, Fx.body("링크", mine: true)]),
+            Fx.row([Fx.meta(unread: nil, time: "오전 9:05"), share, Fx.body("끝", mine: true)]),
+        ])
+        #expect(out == [
+            Message(date: "2026-10-19", time: "09:05", sender: Message.me, kind: .media, text: "[사진/이모티콘]"),
+            Message(date: "2026-10-19", time: "09:05", sender: Message.me, kind: .text, text: "링크"),
+            Message(date: "2026-10-19", time: "09:05", sender: Message.me, kind: .text, text: "끝"),
+        ])
+    }
+
+    @Test func fileRowsBecomeMediaWithFileName() {
+        let texts = ["보고서.pdf", "1.2MB", "유효기간 ~2026.11.18", "용량 1.2MB"].map {
+            AXNode(role: "AXStaticText", value: $0, frame: CGRect(x: 240, y: 0, width: 120, height: 16))
+        }
+        let out = parse([Fx.row([Fx.meta(unread: nil, time: "오전 7:43"), AXNode(role: "AXButton", desc: "공유")] + texts + [
+            AXNode(role: "AXButton", desc: "저장", title: "저장"),
+        ])])
+        #expect(out == [Message(date: "2026-10-19", time: "07:43", sender: Message.me, kind: .media, text: "[파일: 보고서.pdf]")])
+    }
+
     @Test func systemRowsTakeNeighborDateAndEmptyRowsDrop() {
         let out = parse([
             Fx.row([AXNode(role: "AXButton")]),

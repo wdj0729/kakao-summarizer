@@ -4,6 +4,61 @@ import KakaoReadCore
 
 func writeErr(_ s: String) { FileHandle.standardError.write(Data((s + "\n").utf8)) }
 
+func cmdList() throws {
+    let app = try KakaoApp.connect()
+    let rooms = try ChatListParser.parse(window: AX.snapshot(try app.listWindow()))
+    print(JSONOutput.line(rooms))
+}
+
+func cmdMessages(_ argv: [String]) throws {
+    let args = try MessagesArgs.parse(argv)
+    let stop: StopCondition
+    switch args.range {
+    case .count(let n):
+        stop = .count(n)
+    case .since(let spec):
+        guard let cutoff = SinceParser.cutoff(spec, now: Date(), calendar: .current) else {
+            throw KakaoReadError.usage(usageText)
+        }
+        stop = .since(cutoff)
+    }
+
+    let app = try KakaoApp.connect()
+    var rooms: [Room] = []
+    var listError: KakaoReadError? = nil
+    do {
+        rooms = try ChatListParser.parse(window: AX.snapshot(try app.listWindow()))
+    } catch let error as KakaoReadError {
+        listError = error
+    }
+    let openWindows = app.chatWindows()
+    let target: Target
+    do {
+        target = try TargetResolver.resolve(query: args.room, openChatTitles: openWindows.map { $0.title }, rooms: rooms)
+    } catch KakaoReadError.roomNotFound(_) where listError != nil {
+        throw listError!
+    }
+
+    let window: AXUIElement
+    switch target {
+    case .openWindow(let title):
+        window = openWindows.first { $0.title == title }!.element
+    case .listRoom(let room):
+        window = try app.openRoom(named: room.name).window
+    }
+
+    let first = AX.snapshot(window)
+    if !ChatParser.rows(in: first).isEmpty && ChatParser.parse(window: first).isEmpty {
+        throw KakaoReadError.uiChanged
+    }
+
+    let collector = Collector(snapshot: { ChatParser.parse(window: AX.snapshot(window)) },
+                              scroll: { try app.scroll(window, by: $0) })
+    let result = try collector.run(until: stop)
+    for message in result.messages { print(JSONOutput.line(message)) }
+    if let warning = PartialWarning.text(result: result, range: args.range) { writeErr(warning) }
+}
+
 func cmdDump(_ argv: [String]) throws {
     let app = try KakaoApp.connect()
     let only = argv.count >= 2 && argv[0] == "--window" ? argv[1] : nil
@@ -42,11 +97,14 @@ func cmdDebug(_ argv: [String]) throws {
 let argv = Array(CommandLine.arguments.dropFirst())
 do {
     switch argv.first {
+    case "list": try cmdList()
+    case "messages": try cmdMessages(Array(argv.dropFirst()))
     case "dump": try cmdDump(Array(argv.dropFirst()))
     case "debug": try cmdDebug(Array(argv.dropFirst()))
     default: throw KakaoReadError.usage(usageText)
     }
 } catch let error as KakaoReadError {
+    if let candidates = error.candidates { print(JSONOutput.line(candidates)) }
     writeErr(error.message)
     exit(error.exitCode)
 } catch {

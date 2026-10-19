@@ -56,15 +56,32 @@ enum AX {
 
     static func role(_ e: AXUIElement) -> String? { string(e, kAXRoleAttribute) }
 
+    private static let snapshotAttributes = [
+        kAXRoleAttribute, kAXValueAttribute, kAXHelpAttribute, kAXDescriptionAttribute,
+        kAXTitleAttribute, kAXPositionAttribute, kAXSizeAttribute, kAXChildrenAttribute,
+    ] as CFArray
+
+    /// 노드마다 속성을 한 번의 IPC로 가져온다 (속성별로 따로 물으면 노드당 ~17ms라 큰 채팅방에서 수십 초가 걸림).
     static func snapshot(_ e: AXUIElement, depth: Int = 0, maxDepth: Int = 30) -> AXNode {
-        AXNode(
-            role: role(e) ?? "?",
-            value: string(e, kAXValueAttribute),
-            help: string(e, kAXHelpAttribute),
-            desc: string(e, kAXDescriptionAttribute),
-            title: string(e, kAXTitleAttribute),
-            frame: frame(e),
-            children: depth >= maxDepth ? [] : children(e).map { snapshot($0, depth: depth + 1, maxDepth: maxDepth) }
-        )
+        var raw: CFArray?
+        guard AXUIElementCopyMultipleAttributeValues(e, snapshotAttributes, AXCopyMultipleAttributeOptions(rawValue: 0), &raw) == .success,
+              let values = raw as? [AnyObject], values.count == 8 else {
+            return AXNode(role: role(e) ?? "?")
+        }
+        func text(_ i: Int) -> String? {
+            guard let s = values[i] as? String, !s.isEmpty else { return nil }
+            return s
+        }
+        let frame: CGRect? = {
+            let p = values[5], s = values[6]
+            guard CFGetTypeID(p) == AXValueGetTypeID(), CFGetTypeID(s) == AXValueGetTypeID() else { return nil }
+            var point = CGPoint.zero
+            var size = CGSize.zero
+            guard AXValueGetValue(p as! AXValue, .cgPoint, &point), AXValueGetValue(s as! AXValue, .cgSize, &size) else { return nil }
+            return CGRect(origin: point, size: size)
+        }()
+        let kids = depth >= maxDepth ? [] : ((values[7] as? [AXUIElement]) ?? [])
+        return AXNode(role: text(0) ?? "?", value: text(1), help: text(2), desc: text(3), title: text(4), frame: frame,
+                      children: kids.map { snapshot($0, depth: depth + 1, maxDepth: maxDepth) })
     }
 }
