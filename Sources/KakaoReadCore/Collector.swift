@@ -71,10 +71,10 @@ public struct Collector {
                 continue
             }
             var progressed = false
-            if let (offset, _) = alignment {
+            if let alignment {
                 // 새로 도착한 메시지(뒤쪽)도 함께 붙인다. 진전은 과거 쪽으로 넓어졌을 때만.
-                acc = Self.merge(batch: batch, acc: acc, offset: offset)
-                progressed = offset < 0
+                acc = Self.merge(batch: batch, acc: acc, alignment: alignment)
+                progressed = alignment.addsOlder
             }
             if progressed {
                 idle = 0
@@ -107,35 +107,74 @@ public struct Collector {
         m.kind == .system ? "system\u{1}\(m.text)" : "\(m.date)\u{1}\(m.kind.rawValue)\u{1}\(m.text)"
     }
 
-    /// batch를 acc에 겹쳐 놓을 위치. offset = batch[0]이 놓이는 acc 인덱스(음수면 acc보다 과거에서 시작).
-    /// 겹치는 구간이 모두 일치하는 위치 중 가장 길게 겹치는 곳. 우연한 한 줄 일치를 피하려고 최소 2줄(배치가 더 짧으면 그 길이) 겹쳐야 한다.
-    public static func align(batch: [Message], acc: [Message]) -> (offset: Int, length: Int)? {
+    /// batch와 acc가 일치하는 연속 구간들. 둘 다 순서대로 놓이며 서로 겹치지 않는다.
+    public struct Alignment {
+        public var blocks: [(acc: Int, batch: Int, length: Int)]
+
+        /// batch[0]이 놓이는 acc 인덱스(첫 구간 기준). 음수면 acc보다 과거에서 시작.
+        public var offset: Int { blocks[0].acc - blocks[0].batch }
+
+        /// 첫 구간 앞에 batch 행이 acc 행보다 많다 = 과거 쪽으로 넓어졌다.
+        var addsOlder: Bool { blocks[0].batch > blocks[0].acc }
+    }
+
+    /// batch를 acc에 겹쳐 놓을 구간들. 가장 긴 일치 구간을 기준으로 잡고 그 양옆에서 다시 찾는다(difflib 방식).
+    /// 불러온 행 중간의 한 행이 스냅샷마다 빠졌다 나타나도(사진·이모티콘, 새 메시지 도착) 나머지로 맞춘다.
+    /// 우연한 한 줄 일치를 피하려고 구간은 최소 2줄(배치가 더 짧으면 그 길이)이어야 한다.
+    public static func align(batch: [Message], acc: [Message]) -> Alignment? {
         let b = batch.map(key)
         let a = acc.map(key)
         guard !b.isEmpty, !a.isEmpty else { return nil }
         let minLength = min(2, b.count, a.count)
-        var best: (offset: Int, length: Int)? = nil
-        for d in (-(b.count - 1))..<a.count {
-            let start = max(0, d)
-            let end = min(a.count, d + b.count)
-            let length = end - start
-            guard length >= minLength, length > (best?.length ?? 0) else { continue }
-            if (start..<end).allSatisfy({ a[$0] == b[$0 - d] }) { best = (d, length) }
+        var positions: [String: [Int]] = [:]
+        for (j, k) in b.enumerated() { positions[k, default: []].append(j) }
+
+        func longest(_ alo: Int, _ ahi: Int, _ blo: Int, _ bhi: Int) -> (acc: Int, batch: Int, length: Int) {
+            var best = (acc: alo, batch: blo, length: 0)
+            var lengths: [Int: Int] = [:]
+            for i in alo..<ahi {
+                var next: [Int: Int] = [:]
+                for j in positions[a[i]] ?? [] where j >= blo {
+                    if j >= bhi { break }
+                    let k = (lengths[j - 1] ?? 0) + 1
+                    next[j] = k
+                    if k > best.length { best = (i - k + 1, j - k + 1, k) }
+                }
+                lengths = next
+            }
+            return best
         }
-        return best
+
+        func blocks(_ alo: Int, _ ahi: Int, _ blo: Int, _ bhi: Int) -> [(acc: Int, batch: Int, length: Int)] {
+            guard alo < ahi, blo < bhi else { return [] }
+            let m = longest(alo, ahi, blo, bhi)
+            guard m.length >= minLength else { return [] }
+            return blocks(alo, m.acc, blo, m.batch) + [m] + blocks(m.acc + m.length, ahi, m.batch + m.length, bhi)
+        }
+
+        let found = blocks(0, a.count, 0, b.count)
+        return found.isEmpty ? nil : Alignment(blocks: found)
     }
 
-    /// batch를 offset 위치에 겹쳐 acc를 넓힌다: 앞쪽(과거)과 뒤쪽(새로 도착) 모두 붙이고, 겹친 구간의 빈 발신자·시각은 batch로 보충.
-    public static func merge(batch: [Message], acc: [Message], offset d: Int) -> [Message] {
-        var middle = acc
-        for i in max(0, d)..<min(acc.count, d + batch.count) {
-            let b = batch[i - d]
-            if middle[i].sender == nil { middle[i].sender = b.sender }
-            if middle[i].time == nil { middle[i].time = b.time }
+    /// 일치 구간을 따라 acc를 넓힌다: 앞쪽(과거)과 뒤쪽(새로 도착) 모두 붙이고, 일치 구간의 빈 발신자·시각은 batch로 보충.
+    /// 일치하지 않는 행은 양쪽 모두 남긴다. 한쪽 스냅샷에만 보이는 행도 실제 메시지일 수 있다.
+    public static func merge(batch: [Message], acc: [Message], alignment: Alignment) -> [Message] {
+        var out: [Message] = []
+        var ia = 0, ib = 0
+        for (n, block) in alignment.blocks.enumerated() {
+            let accGap = acc[ia..<block.acc], batchGap = batch[ib..<block.batch]
+            out += n == 0 ? Array(batchGap + accGap) : Array(accGap + batchGap)
+            for k in 0..<block.length {
+                var m = acc[block.acc + k]
+                let b = batch[block.batch + k]
+                if m.sender == nil { m.sender = b.sender }
+                if m.time == nil { m.time = b.time }
+                out.append(m)
+            }
+            ia = block.acc + block.length
+            ib = block.batch + block.length
         }
-        let older = d < 0 ? Array(batch[0..<(-d)]) : []
-        let newer = d + batch.count > acc.count ? Array(batch[(acc.count - d)...]) : []
-        return older + middle + newer
+        return out + acc[ia...] + batch[ib...]
     }
 
     public static func trim(_ acc: [Message], to stop: StopCondition, calendar: Calendar) -> [Message] {
