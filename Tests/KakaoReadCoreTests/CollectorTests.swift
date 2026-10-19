@@ -40,6 +40,9 @@ final class AccumulatingChat {
     var history: [Message]
     /// 스냅샷마다 새로 도착하는 메시지 수 (실제 단톡방: 수집 중에도 대화가 이어진다).
     var arrivalsPerSnapshot = 0
+    /// 스냅샷마다 불러온 행을 바꿔 돌려준다 (실제 카톡: 사진·이모티콘 행이 스냅샷에 따라 빠졌다 나타난다).
+    var distort: (Int, [Message]) -> [Message] = { $1 }
+    var snapshots = 0
     var loadedFrom: Int
     let batch: Int
     var bar = 1.0
@@ -64,7 +67,8 @@ final class AccumulatingChat {
             history.append(Message(date: "2026-10-19", time: String(format: "%02d:%02d", 9 + i / 60, i % 60),
                                    sender: "u\(i % 3)", kind: .text, text: "m\(i)"))
         }
-        return Array(history[loadedFrom...])
+        snapshots += 1
+        return distort(snapshots, Array(history[loadedFrom...]))
     }
 
     func collector() -> Collector {
@@ -168,6 +172,27 @@ func history(_ n: Int, text: (Int) -> String = { "m\($0)" }) -> [Message] {
         #expect(r.partial == nil)
     }
 
+    @Test func rowFlickeringInMiddleOfLoadedTableIsMerged() throws {
+        var h = history(200)
+        h[170].kind = .media
+        h[170].text = "[사진/이모티콘]"
+        let chat = AccumulatingChat(h, initiallyLoaded: 50, batch: 20)
+        chat.arrivalsPerSnapshot = 1
+        chat.distort = { n, rows in n % 2 == 0 ? rows.filter { $0.kind != .media } : rows }
+        let r = try chat.collector().run(until: .count(120))
+        #expect(r.messages.map(\.text) == chat.history.suffix(120).map(\.text))
+        #expect(r.partial == nil)
+    }
+
+    @Test func alignToleratesRowMissingInMiddle() {
+        let h = history(10)
+        var batch = h
+        batch.remove(at: 6)
+        let alignment = Collector.align(batch: batch, acc: Array(h[3..<10]))
+        #expect(alignment?.offset == -3)
+        #expect(alignment.map { Collector.merge(batch: batch, acc: Array(h[3..<10]), alignment: $0) } == h)
+    }
+
     @Test func alignFindsOffsetAnywhere() {
         let h = history(10)
         // 배치가 acc보다 앞에서 시작 (과거 쪽으로 진전)
@@ -193,7 +218,7 @@ func history(_ n: Int, text: (Int) -> String = { "m\($0)" }) -> [Message] {
         let h = history(10)
         var acc = Array(h[3..<8])
         acc[0].sender = nil
-        let merged = Collector.merge(batch: h, acc: acc, offset: -3)
+        let merged = Collector.align(batch: h, acc: acc).map { Collector.merge(batch: h, acc: acc, alignment: $0) }
         #expect(merged == h)
     }
 
